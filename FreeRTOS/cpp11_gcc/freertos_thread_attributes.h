@@ -41,9 +41,21 @@ namespace free_rtos_std
     UBaseType_t priority = tskIDLE_PRIORITY + 1;
   };
 
-  constexpr attributes attr_stack_size(configSTACK_DEPTH_TYPE size) { return {.stackWordCount = size}; }
-  constexpr attributes attr_priority(UBaseType_t priority) { return {.priority = priority}; }
-  constexpr attributes attr_name(const char *n) { return {.taskName = n}; }
+  constexpr attributes attr_stack_size(configSTACK_DEPTH_TYPE size) {
+    attributes result{};
+    result.stackWordCount = size;
+    return result;
+  }
+  constexpr attributes attr_priority(UBaseType_t priority) {
+    attributes result{};
+    result.priority = priority;
+    return result;
+  }
+  constexpr attributes attr_name(const char *n) {
+    attributes result{};
+    result.taskName = n;
+    return result;
+  }
 
 }
 

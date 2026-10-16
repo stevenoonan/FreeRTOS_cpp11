@@ -52,6 +52,7 @@ namespace free_rtos_std
     return std::thread(std::forward<Args>(args)...);
   }
 
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
   // @param args - see arguments of std::jthread
   template <typename... Args>
   std::jthread std_jthread(const free_rtos_std::attributes &attr, Args &&...args)
@@ -59,6 +60,7 @@ namespace free_rtos_std
     free_rtos_std::internal::attributes_lock lock{attr};
     return std::jthread(std::forward<Args>(args)...);
   }
+#endif
 
 }
 
