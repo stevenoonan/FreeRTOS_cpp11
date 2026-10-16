@@ -18,89 +18,83 @@
 /// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 /// THE SOFTWARE.
 
-#ifndef GTHR_FREERTOS_INTERNAL_CV_H
-#define GTHR_FREERTOS_INTERNAL_CV_H
-
+#pragma once
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
-#include "thread_gthread.h"
+#include "critical_section.h"
+#include "backend_time.h"
+#include <cerrno>
 
-#include <list>
-#include <bits/functexcept.h>
-
-namespace free_rtos_std
-{
-
-class semaphore
-{
+namespace free_rtos_std {
+// Intrusive stack waiters allocate no list nodes. Index zero is exclusively
+// reserved for this protocol; application notifications must use another index.
+class cv_task_list {
+  struct waiter {
+    TaskHandle_t task;
+    waiter *next;
+    bool signaled;
+  };
+  waiter *head = nullptr;
+  waiter *tail = nullptr;
+  void remove(waiter *item) {
+    waiter *previous = nullptr;
+    for (auto *p = head; p; p = p->next) {
+      if (p == item) {
+        if (previous) previous->next = p->next; else head = p->next;
+        if (tail == p) tail = previous;
+        return;
+      }
+      previous = p;
+    }
+  }
 public:
-  semaphore() : _xSemaphore { xSemaphoreCreateBinary() }
-  {
-    if (!_xSemaphore)
-      std::__throw_system_error(12); // POSIX error: no memory
-    xSemaphoreGive(_xSemaphore);
-  }
-
-  void lock() { xSemaphoreTake(_xSemaphore, portMAX_DELAY); }
-  void unlock() { xSemaphoreGive(_xSemaphore); }
-
-  ~semaphore()
-  {
-    vSemaphoreDelete(_xSemaphore);
-  }
-
-  semaphore(const semaphore &) = delete;
-  semaphore(semaphore &&) = delete;
-  semaphore &operator=(semaphore &) = delete;
-  semaphore &operator=(semaphore &&) = delete;
-
-private:
-  SemaphoreHandle_t _xSemaphore;
-};
-
-// Internal free rtos task's container to support condition variable.
-// Condition variable must know all the threads waiting in a queue.
-//
-class cv_task_list
-{
-public:
-  using __gthread_t = free_rtos_std::gthr_freertos;
-  using thrd_type = __gthread_t::native_task_type;
-  using queue_type = std::list<thrd_type>;
-
-  cv_task_list() = default;
-
-  void remove(thrd_type thrd) { _que.remove(thrd); }
-  void push(thrd_type thrd) { _que.push_back(thrd); }
-  void pop() { _que.pop_front(); }
-  bool empty() const { return _que.empty(); }
-
-  ~cv_task_list()
-  {
-    lock();
-    _que = queue_type{};
-    unlock();
-  }
-
-  // no copy and no move
-  cv_task_list &operator=(const cv_task_list &r) = delete;
-  cv_task_list &operator=(cv_task_list &&r) = delete;
-  cv_task_list(cv_task_list &&) = delete;
+  constexpr cv_task_list() = default;
   cv_task_list(const cv_task_list &) = delete;
-
-  thrd_type &front() { return _que.front(); }
-  const thrd_type &front() const { return _que.front(); }
-  thrd_type &back() { return _que.back(); }
-  const thrd_type &back() const { return _que.back(); }
-
-  void lock() { _sem.lock(); }
-  void unlock() { _sem.unlock(); }
-
-private:
-  queue_type _que;
-  semaphore _sem;
+  cv_task_list &operator=(const cv_task_list &) = delete;
+  ~cv_task_list() { configASSERT(head == nullptr); }
+  void signal(bool all) {
+    critical_section guard;
+    while (head) {
+      auto *p = head;
+      head = p->next;
+      if (!head) tail = nullptr;
+      p->signaled = true;
+      xTaskNotifyGiveIndexed(p->task, 0);
+      if (!all) break;
+    }
+  }
+  int wait(SemaphoreHandle_t *mutex, const int64_t *deadline, bool steady) {
+    waiter self{xTaskGetCurrentTaskHandle(), nullptr, false};
+    {
+      critical_section guard;
+      // Drain only our reserved notification before publishing the waiter.
+      ulTaskNotifyTakeIndexed(0, pdTRUE, 0);
+      if (tail) tail->next = &self; else head = &self;
+      tail = &self;
+    }
+    auto semaphore_result = xSemaphoreGive(*mutex);
+    configASSERT(semaphore_result == pdTRUE);
+    (void)semaphore_result;
+    int result = 0;
+    for (;;) {
+      auto remaining = deadline ? *deadline - (steady ? monotonic_ns() : realtime_ns()) : 0;
+      if (!deadline || remaining > 0)
+        ulTaskNotifyTakeIndexed(0, pdTRUE, deadline ? deadline_ticks(remaining) : portMAX_DELAY);
+      critical_section guard;
+      if (self.signaled) break;
+      if (deadline && (steady ? monotonic_ns() : realtime_ns()) >= *deadline) {
+        remove(&self);
+        result = ETIMEDOUT;
+        break;
+      }
+    }
+    // A signal and timeout are resolved under the same critical section; the
+    // notifier cannot retain this stack address or leave a stale notification.
+    ulTaskNotifyTakeIndexed(0, pdTRUE, 0);
+    semaphore_result = xSemaphoreTake(*mutex, portMAX_DELAY);
+    configASSERT(semaphore_result == pdTRUE);
+    return result;
+  }
 };
-} // namespace free_rtos_std
-
-#endif // GTHR_FREERTOS_INTERNAL_CV_H
+}

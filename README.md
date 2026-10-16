@@ -1380,3 +1380,26 @@ Please have a look at LICENSE file in root directory for details.
 ---
 [1] - Credit to Jakub Sosnovec for providing an initial solution to set custom
       stack size and inspiring me to extend the library with custom attributes.
+
+
+### STM32N6 / GCC 14 maintenance branch
+
+The `stm32-n6-cxx17` branch is maintained for GCC 14 C++17 integration. It uses
+canonical thread IDs, independently owned completion state, intrusive CV waiters,
+and separate monotonic/realtime clocks. Do not combine its native types with
+objects compiled against the upstream or earlier branch headers.
+
+The clock code requires 32-bit FreeRTOS ticks, an integral nanosecond tick period,
+`INCLUDE_xTaskGetSchedulerState=1`, and task-context access. It atomically samples
+`TimeOut_t` (overflow count plus tick). CV waits reserve notification index 0;
+thread identities reserve task TLS pointer slot 0. Applications needing their
+own direct notifications must enable another notification array index and use
+indexed APIs. Self-deleted TCBs/stacks still require idle CPU time to be reclaimed.
+
+GCC 14's direct clock-selecting mutex/CV header paths require the common C++
+configuration to define `_GLIBCXX_USE_PTHREAD_COND_CLOCKWAIT=1` and
+`_GLIBCXX_USE_PTHREAD_MUTEX_CLOCKLOCK=1`. The inline functions with pthread names
+are compatibility hooks for these headers, not a general pthread implementation.
+The application must also provide matching newlib locks/reentrancy, ARM C++
+guards, bounded allocation and a consistent exceptions policy; these are platform
+integration responsibilities, not supplied by this adapter alone.

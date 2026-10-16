@@ -29,11 +29,21 @@
 #include "gthr_key.h"
 
 #include <sys/time.h>
+#include <time.h>
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 4 // newlib clock ID, hidden unless POSIX timers are enabled
+#endif
+#include "backend_time.h"
 
 typedef free_rtos_std::gthr_freertos __gthread_t;
 
 namespace free_rtos_std
 {
+  struct RecursiveMutex {
+    SemaphoreHandle_t value = nullptr;
+    operator SemaphoreHandle_t() const { return value; }
+    RecursiveMutex &operator=(SemaphoreHandle_t handle) { value = handle; return *this; }
+  };
   struct Once
   {
     bool v = false;
@@ -54,7 +64,7 @@ extern "C"
   typedef free_rtos_std::Key *__gthread_key_t;
   typedef free_rtos_std::Once __gthread_once_t;
   typedef SemaphoreHandle_t __gthread_mutex_t;
-  typedef SemaphoreHandle_t __gthread_recursive_mutex_t;
+  typedef free_rtos_std::RecursiveMutex __gthread_recursive_mutex_t;
   typedef free_rtos_std::cv_task_list __gthread_cond_t;
 
 #define __GTHREAD_ONCE_INIT free_rtos_std::Once()
@@ -63,10 +73,12 @@ extern "C"
       __gthread_recursive_mutex_t *mutex)
   {
     *mutex = xSemaphoreCreateRecursiveMutex();
+    configASSERT(*mutex);
   }
   static inline void __GTHREAD_MUTEX_INIT_FUNCTION(__gthread_mutex_t *mutex)
   {
     *mutex = xSemaphoreCreateMutex();
+    configASSERT(*mutex);
   }
 
   static int __gthread_once(__gthread_once_t *once, void (*func)(void))
@@ -153,7 +165,7 @@ extern "C"
 
   struct __gthread_time_t
   {
-    long sec;
+    time_t sec;
     long nsec;
     int64_t milliseconds() const
     {
@@ -161,33 +173,26 @@ extern "C"
     }
   };
 
-  static inline __gthread_time_t operator-(
-      const __gthread_time_t &lhs, const timeval &rhs)
-  {
-    int32_t s{lhs.sec - rhs.tv_sec};
-    int32_t ns{lhs.nsec - rhs.tv_usec * 1000};
-
-    return __gthread_time_t{s, ns};
-  }
-
   static inline int __gthread_mutex_timedlock(
       __gthread_mutex_t *m, const __gthread_time_t *abs_timeout)
   {
-    timeval now{};
-    gettimeofday(&now, NULL);
-
-    auto t = (*abs_timeout - now).milliseconds();
-    return (xSemaphoreTake(*m, pdMS_TO_TICKS(t)) == pdTRUE) ? 0 : 1;
+    const int64_t end = int64_t(abs_timeout->sec) * 1000000000 + abs_timeout->nsec;
+    do {
+      auto left = end - free_rtos_std::realtime_ns();
+      if (xSemaphoreTake(*m, free_rtos_std::deadline_ticks(left)) == pdTRUE) return 0;
+    } while (free_rtos_std::realtime_ns() < end);
+    return ETIMEDOUT;
   }
 
   static inline int __gthread_recursive_mutex_timedlock(
       __gthread_recursive_mutex_t *m, const __gthread_time_t *abs_time)
   {
-    timeval now{};
-    gettimeofday(&now, NULL);
-
-    auto t = (*abs_time - now).milliseconds();
-    return (xSemaphoreTakeRecursive(*m, pdMS_TO_TICKS(t)) == pdTRUE) ? 0 : 1;
+    const int64_t end = int64_t(abs_time->sec) * 1000000000 + abs_time->nsec;
+    do {
+      auto left = end - free_rtos_std::realtime_ns();
+      if (xSemaphoreTakeRecursive(*m, free_rtos_std::deadline_ticks(left)) == pdTRUE) return 0;
+    } while (free_rtos_std::realtime_ns() < end);
+    return ETIMEDOUT;
   }
 
   // All functions returning int should return zero on success or the error
@@ -223,80 +228,51 @@ extern "C"
 
   static inline int __gthread_cond_signal(__gthread_cond_t *cond)
   {
-    cond->lock();
-    if (!cond->empty())
-    {
-      auto t = cond->front();
-      cond->pop();
-      xTaskNotifyGive(t);
-    }
-    cond->unlock();
+    cond->signal(false);
     return 0;
   }
-
-  static inline int __gthread_cond_broadcast(__gthread_cond_t *cond)
-  {
-    cond->lock();
-    while (!cond->empty())
-    {
-      auto t = cond->front();
-      cond->pop();
-      xTaskNotifyGive(t);
-    }
-    cond->unlock();
+  static inline int __gthread_cond_broadcast(__gthread_cond_t *cond) {
+    cond->signal(true);
     return 0;
   }
-
-  static inline int __gthread_cond_destroy(__gthread_cond_t *cond)
-  {
-    // nothing to do
-    return 0;
+  static inline int __gthread_cond_destroy(__gthread_cond_t *) { return 0; }
+  static inline int __gthread_cond_wait(__gthread_cond_t *cond, __gthread_mutex_t *mutex) {
+    return cond->wait(mutex, nullptr, false);
   }
-
-  static inline int __gthread_cond_wait(__gthread_cond_t *cond, __gthread_mutex_t *mutex)
-  {
-    // Note: 'mutex' is taken before entering this function
-
-    cond->lock();
-    cond->push(__gthread_t::native_task_handle());
-    cond->unlock();
-
-    __gthread_mutex_unlock(mutex);
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    __gthread_mutex_lock(mutex); // lock and return
-    return 0;
+  static inline int __gthread_cond_timedwait(__gthread_cond_t *cond,
+      __gthread_mutex_t *mutex, const __gthread_time_t *time) {
+    const int64_t end = int64_t(time->sec) * 1000000000 + time->nsec;
+    return cond->wait(mutex, &end, false);
   }
-
-  static inline int __gthread_cond_timedwait(
-      __gthread_cond_t *cond, __gthread_mutex_t *mutex,
-      const __gthread_time_t *abs_timeout)
-  {
-    auto this_thrd_hndl{__gthread_t::native_task_handle()};
-    cond->lock();
-    cond->push(this_thrd_hndl);
-    cond->unlock();
-
-    timeval now{};
-    gettimeofday(&now, NULL);
-
-    auto ms{(*abs_timeout - now).milliseconds()};
-
-    __gthread_mutex_unlock(mutex);
-    auto fTimeout{0 == ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(ms))};
-    __gthread_mutex_lock(mutex);
-
-    int result{0};
-    if (fTimeout)
-    { // timeout - remove the thread from the waiting list
-      cond->lock();
-      cond->remove(this_thrd_hndl);
-      cond->unlock();
-      result = 138; // posix ETIMEDOUT
-    }
-
-    return result;
+  // GCC 14's std::__condvar names this POSIX entry point directly. This inline
+  // compatibility hook implements only its clock-selecting wait, not pthreads.
+  static inline int pthread_cond_clockwait(__gthread_cond_t *cond,
+      __gthread_mutex_t *mutex, clockid_t clock, const __gthread_time_t *time) {
+    if (clock != CLOCK_MONOTONIC && clock != CLOCK_REALTIME) return EINVAL;
+    const int64_t end = int64_t(time->sec) * 1000000000 + time->nsec;
+    return cond->wait(mutex, &end, clock == CLOCK_MONOTONIC);
   }
-
 } // extern "C"
 
-#endif // _GTHR_FREERTOS_X__H_
+static inline int freertos_mutex_clocklock(SemaphoreHandle_t mutex, bool recursive,
+    clockid_t clock, const __gthread_time_t *time) {
+  if (clock != CLOCK_MONOTONIC && clock != CLOCK_REALTIME) return EINVAL;
+  const int64_t end = int64_t(time->sec) * 1000000000 + time->nsec;
+  auto now = [clock] { return clock == CLOCK_MONOTONIC
+                           ? free_rtos_std::monotonic_ns() : free_rtos_std::realtime_ns(); };
+  do {
+    auto ticks = free_rtos_std::deadline_ticks(end - now());
+    if ((recursive ? xSemaphoreTakeRecursive(mutex, ticks) : xSemaphoreTake(mutex, ticks)) == pdTRUE)
+      return 0;
+  } while (now() < end);
+  return ETIMEDOUT;
+}
+static inline int pthread_mutex_clocklock(__gthread_mutex_t *mutex,
+    clockid_t clock, const __gthread_time_t *time) {
+  return freertos_mutex_clocklock(*mutex, false, clock, time);
+}
+static inline int pthread_mutex_clocklock(__gthread_recursive_mutex_t *mutex,
+    clockid_t clock, const __gthread_time_t *time) {
+  return freertos_mutex_clocklock(*mutex, true, clock, time);
+}
+#endif

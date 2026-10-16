@@ -24,6 +24,7 @@
 #include <system_error>
 #include <cerrno>
 #include "FreeRTOS.h"
+#include "backend_time.h"
 
 #include "gthr_key_type.h"
 #include "freertos_thread_attributes.h"
@@ -109,11 +110,11 @@ namespace std
 
   void this_thread::__sleep_for(chrono::seconds sec, chrono::nanoseconds nsec)
   {
-    long ms = nsec.count() / 1'000'000;
-    if (sec.count() == 0 && ms == 0 && nsec.count() > 0)
-      ms = 1; // round up to 1 ms => if sleep time != 0, sleep at least 1ms
-
-    vTaskDelay(pdMS_TO_TICKS(chrono::milliseconds(sec).count() + ms));
+    constexpr auto billion = 1000000000LL;
+    const auto seconds = sec.count();
+    auto ns = seconds > (INT64_MAX - nsec.count()) / billion
+            ? INT64_MAX : seconds * billion + nsec.count();
+    free_rtos_std::sleep_ns(ns);
   }
 
 } // namespace std

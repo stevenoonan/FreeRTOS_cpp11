@@ -19,79 +19,57 @@
 /// THE SOFTWARE.
 
 #include "freertos_time.h"
+#include "backend_time.h"
 #include "critical_section.h"
 #include <sys/time.h>
-#include <chrono>
-#include "FreeRTOS.h"
-#include "task.h"
+#include <cerrno>
 
-namespace free_rtos_std
-{
-
-class wall_clock
-{
-public:
-  struct time_data
-  {
-    timeval offset;
-    TickType_t ticks;
-  };
-
-  static time_data time()
-  { //atomic
-    critical_section critical;
-    return time_data{_timeOffset, xTaskGetTickCount()};
-  }
-
-  static void time(const timeval &time)
-  { //atomic
-    critical_section critical;
-    _timeOffset = time;
-  }
-
-private:
-  static timeval _timeOffset;
-};
-
-timeval wall_clock::_timeOffset;
-
-} // namespace free_rtos_std
-
-using namespace std::chrono;
-void SetSystemClockTime(
-    const time_point<system_clock, system_clock::duration> &time)
-{
-  auto delta{time - time_point<system_clock>(
-                        milliseconds(pdTICKS_TO_MS(xTaskGetTickCount())))};
-  long long sec{duration_cast<seconds>(delta).count()};
-  long usec = duration_cast<microseconds>(delta).count() - sec * 1'000'000; //narrowing type
-
-  free_rtos_std::wall_clock::time({sec, usec});
+namespace free_rtos_std {
+static int64_t wall_offset;
+int64_t monotonic_ns() {
+  if (xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED) return 0;
+  TimeOut_t sample;
+  vTaskSetTimeOutState(&sample);
+  return int64_t(extend_ticks(uint32_t(sample.xOverflowCount), sample.xTimeOnEntering))
+       * (1000000000LL / configTICK_RATE_HZ);
 }
-
-static timeval operator+(const timeval &l, const timeval &r)
-{
-  timeval t{l.tv_sec + r.tv_sec, l.tv_usec + r.tv_usec};
-
-  if (t.tv_usec >= 1'000'000)
-  {
-    t.tv_sec++;
-    t.tv_usec -= 1'000'000;
-  }
-  return t;
+int64_t realtime_ns() {
+  if (xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED) return wall_offset;
+  critical_section guard;
+  return monotonic_ns() + wall_offset;
 }
-
-extern "C" int _gettimeofday(timeval *tv, void *tzvp)
-{
-  (void)tzvp;
-
-  auto t{free_rtos_std::wall_clock::time()};
-
-  long long ms{pdTICKS_TO_MS(t.ticks)};
-  long long sec{ms / 1000};
-  long usec = (ms - sec * 1000) * 1000; //narrowing type
-
-  *tv = t.offset + timeval{sec, usec};
-
-  return 0; // return non-zero for error
+void sleep_ns(int64_t ns) {
+  if (ns <= 0) return;
+  configASSERT(xTaskGetSchedulerState() == taskSCHEDULER_RUNNING);
+  auto now = monotonic_ns();
+  const auto end = ns > INT64_MAX - now ? INT64_MAX : now + ns;
+  while ((now = monotonic_ns()) < end) vTaskDelay(deadline_ticks(end - now));
+}
+}
+void SetSystemClockTime(const std::chrono::system_clock::time_point &time) {
+  auto value = std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
+  if (xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED) {
+    free_rtos_std::wall_offset = value;
+    return;
+  }
+  free_rtos_std::critical_section guard;
+  free_rtos_std::wall_offset = value - free_rtos_std::monotonic_ns();
+}
+namespace std { namespace chrono { inline namespace _V2 {
+steady_clock::time_point steady_clock::now() noexcept {
+  return time_point(duration(free_rtos_std::monotonic_ns()));
+}
+system_clock::time_point system_clock::now() noexcept {
+  return time_point(duration(free_rtos_std::realtime_ns()));
+}
+}}}
+extern "C" int _gettimeofday(timeval *tv, void *) {
+  if (!tv) { errno = EINVAL; return -1; }
+  auto ns = free_rtos_std::realtime_ns();
+  auto sec = ns / 1000000000;
+  auto usec = (ns % 1000000000) / 1000;
+  if (usec < 0) { --sec; usec += 1000000; }
+  tv->tv_sec = sec;
+  tv->tv_usec = usec;
+  return 0;
 }
