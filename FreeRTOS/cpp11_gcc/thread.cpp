@@ -40,11 +40,10 @@ namespace std
 
   static void __execute_native_thread_routine(void *__p)
   {
-    __gthread_t local{*static_cast<__gthread_t *>(__p)}; // copy
+    auto local = __gthread_t::from_start_argument(__p);
 
     { // we own the arg now; it must be deleted after run() returns
       thread::_State_ptr __t{static_cast<thread::_State *>(local.arg())};
-      local.notify_started(); // copy has been made; tell we are running
       __t->_M_run();
     }
 
@@ -71,7 +70,10 @@ namespace std
   {
     id invalid;
     if (_M_id._M_thread != invalid._M_thread)
-      __gthread_join(_M_id._M_thread, nullptr);
+    {
+      const int error = __gthread_join(_M_id._M_thread, nullptr);
+      if (error) __throw_system_error(error);
+    }
     else
       __throw_system_error(EINVAL);
 
@@ -83,7 +85,10 @@ namespace std
   {
     id invalid;
     if (_M_id._M_thread != invalid._M_thread)
-      __gthread_detach(_M_id._M_thread);
+    {
+      const int error = __gthread_detach(_M_id._M_thread);
+      if (error) __throw_system_error(error);
+    }
     else
       __throw_system_error(EINVAL);
 

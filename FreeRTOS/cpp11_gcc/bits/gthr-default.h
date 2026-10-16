@@ -200,13 +200,11 @@ extern "C"
   }
   static inline int __gthread_join(__gthread_t &thread, void **value_ptr)
   {
-    thread.join();
-    return 0;
+    return thread.join();
   }
   static inline int __gthread_detach(__gthread_t &thread)
   {
-    thread.detach();
-    return 0;
+    return thread.detach();
   }
   static inline int __gthread_equal(const __gthread_t &t1,
                                     const __gthread_t &t2)
