@@ -31,7 +31,7 @@
 
 namespace free_rtos_std
 {
-  extern Key *s_key;
+  extern std::atomic<Key *> s_key;
 
   const attributes *internal::attributes_lock::_attrib{&internal::attributes_lock::_default};
 } // namespace free_rtos_std
@@ -48,8 +48,8 @@ namespace std
       __t->_M_run();
     }
 
-    if (free_rtos_std::s_key)
-      free_rtos_std::s_key->CallDestructor(__gthread_t::self().native_task_handle());
+    if (auto *key = free_rtos_std::s_key.load(std::memory_order_acquire))
+      key->CallDestructor(__gthread_t::native_task_handle());
 
     local.notify_joined(); // finished; release joined threads
   }

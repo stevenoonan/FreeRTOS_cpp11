@@ -24,16 +24,16 @@
 namespace free_rtos_std
 {
 
-Key *s_key;
+std::atomic<Key *> s_key{nullptr};
 
 int freertos_gthread_key_create(Key **keyp, void (*dtor)(void *))
 {
   // There is only one key for all threads. If more keys are needed
   // a list must be implemented.
-  assert(!s_key);
-  s_key = new Key(dtor);
-
-  *keyp = s_key;
+  assert(!s_key.load(std::memory_order_acquire));
+  auto *created = new Key(dtor);
+  s_key.store(created, std::memory_order_release);
+  *keyp = created;
   return 0;
 }
 
@@ -42,8 +42,7 @@ int freertos_gthread_key_delete(Key *)
   // no synchronization here:
   //   It is up to the applicaiton to delete (or maintain a reference)
   //   the thread specific data associated with the key.
-  delete s_key;
-  s_key = nullptr;
+  delete s_key.exchange(nullptr, std::memory_order_acq_rel);
   return 0;
 }
 

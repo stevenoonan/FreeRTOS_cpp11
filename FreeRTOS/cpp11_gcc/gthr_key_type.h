@@ -24,6 +24,7 @@
 #include "thread_gthread.h"
 #include <unordered_map>
 #include <mutex>
+#include <atomic>
 
 namespace free_rtos_std
 {
