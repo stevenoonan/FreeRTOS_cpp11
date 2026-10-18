@@ -28,8 +28,18 @@ namespace free_rtos_std
 {
 struct critical_section
 {
-  critical_section() { taskENTER_CRITICAL(); }
-  ~critical_section() { taskEXIT_CRITICAL(); }
+  critical_section() {
+    taskENTER_CRITICAL();
+#ifdef FREERTOS_CPP11_CRITICAL_TRACE_ENTER
+    FREERTOS_CPP11_CRITICAL_TRACE_ENTER(__builtin_return_address(0));
+#endif
+  }
+  ~critical_section() {
+#ifdef FREERTOS_CPP11_CRITICAL_TRACE_EXIT
+    FREERTOS_CPP11_CRITICAL_TRACE_EXIT();
+#endif
+    taskEXIT_CRITICAL();
+  }
 };
 } // namespace free_rtos_std
 
