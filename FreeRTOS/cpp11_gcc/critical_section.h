@@ -26,6 +26,16 @@
 
 namespace free_rtos_std
 {
+// Serialize task-context creation/attributes while permitting timer IRQs.
+// Creating kernel objects is permitted while scheduling is suspended.
+struct scheduler_section
+{
+  scheduler_section() {
+    configASSERT(xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED);
+    vTaskSuspendAll();
+  }
+  ~scheduler_section() { xTaskResumeAll(); }
+};
 struct critical_section
 {
   critical_section() {

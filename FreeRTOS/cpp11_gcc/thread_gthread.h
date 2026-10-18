@@ -41,7 +41,7 @@ namespace free_rtos_std
   {
     // Attributes are consumed synchronously by xTaskCreate. No operation in
     // this scope waits for the worker to start, including a thread move.
-    struct attributes_lock : critical_section
+    struct attributes_lock : scheduler_section
     {
       explicit attributes_lock(const attributes &attr) : _previous(_attrib) { _attrib = &attr; }
       ~attributes_lock() { _attrib = _previous; }
@@ -76,11 +76,16 @@ namespace free_rtos_std
 
     static void release(completion *shared)
     {
-      critical_section guard;
-      configASSERT(shared->references != 0);
-      if (--shared->references == 0)
+      bool last;
       {
-        // Neither owner nor worker can access the event after its last release.
+        critical_section guard;
+        configASSERT(shared->references != 0);
+        last = --shared->references == 0;
+      }
+      if (last)
+      {
+        // No references remain. Deallocation may suspend scheduling, but must
+        // not keep timer IRQs masked while walking allocator/kernel lists.
         vEventGroupDelete(shared->event);
         vPortFree(shared);
       }
@@ -110,7 +115,7 @@ namespace free_rtos_std
       shared->task = nullptr;
       shared->references = 2; // std::thread owner and worker
       {
-        critical_section guard;
+        scheduler_section guard;
         const auto &attr = *internal::attributes_lock::_attrib;
         // The stable shared block is the entry argument. Nothing in the worker
         // depends on the address/lifetime of a std::thread object or temporary.
